@@ -249,6 +249,205 @@ public class DataRetriever {
         }
     }
 
+    // ============================================
+    // NOUVELLES MÉTHODES POUR L'EXAMEN K2
+    // ============================================
+
+    public Order findOrderByReference(String reference) {
+        DBConnection dbConnection = new DBConnection();
+        try (Connection connection = dbConnection.getConnection()) {
+            PreparedStatement preparedStatement = connection.prepareStatement(
+                    """
+                    SELECT id, reference, creation_datetime, payment_status
+                    FROM "order" 
+                    WHERE reference = ?
+                    """);
+            preparedStatement.setString(1, reference);
+            ResultSet resultSet = preparedStatement.executeQuery();
+
+            if (resultSet.next()) {
+                Order order = new Order();
+                order.setId(resultSet.getInt("id"));
+                order.setReference(resultSet.getString("reference"));
+                order.setCreationDatetime(resultSet.getTimestamp("creation_datetime").toInstant());
+                order.setPaymentStatus(PaymentStatusEnum.valueOf(resultSet.getString("payment_status")));
+
+                Sale sale = findSaleByOrderId(order.getId());
+                order.setSale(sale);
+
+                return order;
+            }
+            return null;
+        } catch (SQLException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    public Order saveOrder(Order orderToSave) {
+        DBConnection dbConnection = new DBConnection();
+        try (Connection connection = dbConnection.getConnection()) {
+            connection.setAutoCommit(false);
+
+            if (orderToSave.getId() != null) {
+                Order existingOrder = findOrderById(orderToSave.getId());
+
+                if (existingOrder != null && existingOrder.isPaid()) {
+                    throw new IllegalStateException("La commande a déjà été payée et ne peut plus être modifiée.");
+                }
+            }
+
+            String upsertSql = """
+                INSERT INTO "order" (id, reference, creation_datetime, payment_status)
+                VALUES (?, ?, ?, ?::payment_status_enum)
+                ON CONFLICT (id) DO UPDATE
+                SET reference = EXCLUDED.reference,
+                    creation_datetime = EXCLUDED.creation_datetime,
+                    payment_status = EXCLUDED.payment_status
+                RETURNING id
+                """;
+
+            PreparedStatement ps = connection.prepareStatement(upsertSql);
+
+            if (orderToSave.getId() != null) {
+                ps.setInt(1, orderToSave.getId());
+            } else {
+                ps.setInt(1, getNextSerialValue(connection, "order", "id"));
+            }
+
+            ps.setString(2, orderToSave.getReference());
+            ps.setTimestamp(3, Timestamp.from(orderToSave.getCreationDatetime()));
+            ps.setString(4, orderToSave.getPaymentStatus().name());
+
+            ResultSet rs = ps.executeQuery();
+            if (rs.next()) {
+                int generatedId = rs.getInt(1);
+                orderToSave.setId(generatedId);
+            }
+
+            connection.commit();
+            return orderToSave;
+
+        } catch (SQLException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    public Sale createSaleFrom(Order order) {
+        if (order == null) {
+            throw new IllegalArgumentException("La commande ne peut pas être nulle");
+        }
+
+        if (!order.isPaid()) {
+            throw new IllegalStateException("Une vente ne peut être créée que pour une commande payée.");
+        }
+
+        if (order.hasSale()) {
+            throw new IllegalStateException("Une commande ne peut être associée qu'à une seule vente.");
+        }
+
+        DBConnection dbConnection = new DBConnection();
+        try (Connection connection = dbConnection.getConnection()) {
+            connection.setAutoCommit(false);
+
+            Order managedOrder = findOrderById(order.getId());
+            if (managedOrder == null) {
+                throw new IllegalArgumentException("La commande n'existe pas dans la base de données");
+            }
+
+            if (saleExistsForOrderId(connection, managedOrder.getId())) {
+                throw new IllegalStateException("Une vente existe déjà pour cette commande.");
+            }
+
+            Sale sale = new Sale(managedOrder);
+
+            String insertSaleSql = """
+                INSERT INTO sale (id, creation_date, order_id)
+                VALUES (?, ?, ?)
+                RETURNING id
+                """;
+
+            PreparedStatement ps = connection.prepareStatement(insertSaleSql);
+            int saleId = getNextSerialValue(connection, "sale", "id");
+            ps.setInt(1, saleId);
+            ps.setTimestamp(2, Timestamp.from(sale.getCreationDate()));
+            ps.setInt(3, managedOrder.getId());
+
+            ps.executeUpdate();
+            sale.setId(saleId);
+
+            connection.commit();
+            return sale;
+
+        } catch (SQLException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private Order findOrderById(Integer id) {
+        if (id == null) return null;
+
+        DBConnection dbConnection = new DBConnection();
+        try (Connection connection = dbConnection.getConnection()) {
+            PreparedStatement preparedStatement = connection.prepareStatement(
+                    "SELECT id, reference, creation_datetime, payment_status FROM \"order\" WHERE id = ?");
+            preparedStatement.setInt(1, id);
+            ResultSet resultSet = preparedStatement.executeQuery();
+
+            if (resultSet.next()) {
+                Order order = new Order();
+                order.setId(resultSet.getInt("id"));
+                order.setReference(resultSet.getString("reference"));
+                order.setCreationDatetime(resultSet.getTimestamp("creation_datetime").toInstant());
+                order.setPaymentStatus(PaymentStatusEnum.valueOf(resultSet.getString("payment_status")));
+
+                Sale sale = findSaleByOrderId(order.getId());
+                order.setSale(sale);
+
+                return order;
+            }
+            return null;
+        } catch (SQLException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private Sale findSaleByOrderId(Integer orderId) {
+        if (orderId == null) return null;
+
+        DBConnection dbConnection = new DBConnection();
+        try (Connection connection = dbConnection.getConnection()) {
+            PreparedStatement preparedStatement = connection.prepareStatement(
+                    "SELECT id, creation_date FROM sale WHERE order_id = ?");
+            preparedStatement.setInt(1, orderId);
+            ResultSet resultSet = preparedStatement.executeQuery();
+
+            if (resultSet.next()) {
+                Sale sale = new Sale();
+                sale.setId(resultSet.getInt("id"));
+                sale.setCreationDate(resultSet.getTimestamp("creation_date").toInstant());
+                return sale;
+            }
+            return null;
+        } catch (SQLException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private boolean saleExistsForOrderId(Connection connection, Integer orderId) throws SQLException {
+        PreparedStatement preparedStatement = connection.prepareStatement(
+                "SELECT COUNT(*) FROM sale WHERE order_id = ?");
+        preparedStatement.setInt(1, orderId);
+        ResultSet resultSet = preparedStatement.executeQuery();
+
+        if (resultSet.next()) {
+            return resultSet.getInt(1) > 0;
+        }
+        return false;
+    }
+
+    // ============================================
+    // MÉTHODES PRIVÉES EXISTANTES
+    // ============================================
 
     private void detachIngredients(Connection conn, List<DishIngredient> dishIngredients) {
         Map<Integer, List<DishIngredient>> dishIngredientsGroupByDishId = dishIngredients.stream()
