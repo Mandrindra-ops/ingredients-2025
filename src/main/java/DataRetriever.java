@@ -333,38 +333,41 @@ public class DataRetriever {
     }
 
     public Sale createSaleFrom(Order order) {
+        // Vérification 1: La commande doit exister
         if (order == null) {
             throw new IllegalArgumentException("La commande ne peut pas être nulle");
         }
 
+        // Vérification 2: La commande doit être payée
         if (!order.isPaid()) {
             throw new IllegalStateException("Une vente ne peut être créée que pour une commande payée.");
-        }
-
-        if (order.hasSale()) {
-            throw new IllegalStateException("Une commande ne peut être associée qu'à une seule vente.");
         }
 
         DBConnection dbConnection = new DBConnection();
         try (Connection connection = dbConnection.getConnection()) {
             connection.setAutoCommit(false);
 
+            // Vérification 3: S'assurer que la commande est bien dans la base de données
             Order managedOrder = findOrderById(order.getId());
             if (managedOrder == null) {
                 throw new IllegalArgumentException("La commande n'existe pas dans la base de données");
             }
 
+            // Vérification 4: Vérifier DIRECTEMENT DANS LA BASE DE DONNÉES si une vente existe déjà
+            // (C'est ce que le sujet demande)
             if (saleExistsForOrderId(connection, managedOrder.getId())) {
-                throw new IllegalStateException("Une vente existe déjà pour cette commande.");
+                throw new IllegalStateException("Une commande ne peut être associée qu'à une seule vente.");
             }
 
+            // Créer la vente
             Sale sale = new Sale(managedOrder);
 
+            // Sauvegarder la vente dans la base de données
             String insertSaleSql = """
-                INSERT INTO sale (id, creation_date, order_id)
-                VALUES (?, ?, ?)
-                RETURNING id
-                """;
+            INSERT INTO sale (id, creation_date, order_id)
+            VALUES (?, ?, ?)
+            RETURNING id
+            """;
 
             PreparedStatement ps = connection.prepareStatement(insertSaleSql);
             int saleId = getNextSerialValue(connection, "sale", "id");
